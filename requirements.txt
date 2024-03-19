@@ -1,0 +1,10 @@
+colour
+jupyter
+matplotlib
+opencv-python
+Pillow==9.5.0
+PyYAML
+requests
+tensorflow
+torch
+torchvision
