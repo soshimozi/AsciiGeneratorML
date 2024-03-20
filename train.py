@@ -2,6 +2,9 @@ import argparse
 from os import listdir
 from numpy import asarray
 from numpy import vstack
+
+from tensorflow import keras
+
 from tensorflow.keras.utils import img_to_array
 from tensorflow.keras.utils import load_img
 from numpy import savez_compressed
@@ -31,6 +34,8 @@ from pathlib import Path
 import os
 import sys
 
+import yaml
+
 from utils.general import (
 	LOGGER,
 	check_file,
@@ -52,19 +57,19 @@ RANK = int(os.getenv("RANK", -1))
 WORLD_SIZE = int(os.getenv("WORLD_SIZE", 1))
 #GIT_INFO = check_git_info()
 
-gpus = tf.config.experimental.list_physical_devices('GPU')    
-for gpu in gpus:
-	tf.config.experimental.set_memory_growth(gpu, True)
-	tf.config.experimental.set_virtual_device_configuration(
-		gpu,
-		[tf.config.experimental.VirtualDeviceConfiguration(memory_limit=4096)]) # Notice here
+# gpus = tf.config.experimental.list_physical_devices('GPU')    
+# for gpu in gpus:
+# 	tf.config.experimental.set_memory_growth(gpu, True)
+# 	tf.config.experimental.set_virtual_device_configuration(
+# 		gpu,
+# 		[tf.config.experimental.VirtualDeviceConfiguration(memory_limit=4096)]) # Notice here
 
 def load_images(path, size=(512,1024)):
 	src_list = list()
 	tar_list = list()
 	for filename in listdir(path):
 		# load and resize the image
-		pixels = load_img(path + filename, target_size=size) # images are in PIL formate
+		pixels = load_img(path + '/' + filename, target_size=size) # images are in PIL formate
 		# convert to numpy array
 		pixels = img_to_array(pixels)
 		# split into colored and sketch. 256 comes from 512/2. The first part is colored while the rest is sketch
@@ -244,7 +249,7 @@ def generate_fake_samples(g_model, samples, patch_shape):
 	return X, y
 
 # generate samples and save as a plot and save the model
-def summarize_performance(step, g_model, dataset, n_samples=3):
+def summarize_performance(step, g_model, dataset, plotsave_dir, modelsave_dir, n_samples=3):
 	# select a sample of input images
 	[X_realA, X_realB], _ = generate_real_samples(dataset, n_samples, 1)
 	# generate a batch of fake samples
@@ -270,25 +275,24 @@ def summarize_performance(step, g_model, dataset, n_samples=3):
 		pyplot.imshow(X_realB[i])
 	# save plot to file
 	filename1 = 'plot_%06d.png' % (step+1)
+	filename1 = plotsave_dir / filename1
 	pyplot.savefig(filename1)
 	pyplot.close()
 	# save the generator model
 	filename2 = 'model_%06d.h5' % (step+1)
+	filename2 = modelsave_dir / filename2
 	g_model.save(filename2)
 	print('>Saved: %s and %s' % (filename1, filename2))
 
 def train(d_model, g_model, gan_model, opt):
 
-	save_dir, epochs, batch_size, data = (
+	save_dir, epochs, batch_size, dataset, plotresults_path = (
 		Path(opt.save_dir),
 		opt.epochs,
 		opt.batch_size,
-		opt.data,
+		opt.dataset,
+		opt.plotresults_path
 	)
-
-
-	save_dir.mkdir(parents=True, exist_ok=True)  # make dir
-	return
 
 	# determine the output square shape of the discriminator
 	n_patch = d_model.output_shape[1]
@@ -314,15 +318,20 @@ def train(d_model, g_model, gan_model, opt):
 		print('>%d, d1[%.3f] d2[%.3f] g[%.3f]' % (i+1, d_loss1, d_loss2, g_loss), flush=True)
 		# summarize model performance
 		if (i+1) % (bat_per_epo * 10) == 0:
-			summarize_performance(i, g_model, dataset)
+			summarize_performance(i, g_model, dataset, opt)
+
+	summarize_performance(n_steps, g_model, dataset=dataset, plotsave_dir=plotresults_path, modelsave_dir=save_dir)
+	g_model.save(save_dir / 'model_final.h5')
+
 
 def preprocess_data(opt):
 	print(f'Process data out of {opt.data} into a zip file.')
 
 def main(opt):
 	
-	if RANK in {-1, 0}:
-		print_args(vars(opt))
+	#if RANK in {-1, 0}:
+		#print('args')
+		#print_args(vars(opt))
 		#check_git_status()
 		#check_requirements(ROOT / "requirements.txt")
 	
@@ -333,29 +342,47 @@ def main(opt):
 	
 	opt.save_dir = str(increment_path(Path(opt.project) / opt.name, exist_ok=opt.exist_ok))
 	
-	print(opt.save_dir)
-		
+	with open(opt.data, errors="ignore") as f:
+		dat = yaml.safe_load(f)
+		opt.data_path = dat['path']
 
+
+	print(opt.data_path)
 	#path = opt.data_directory
 
-	#print('Loading dataset from ', path, flush=True)
+	print('Loading images from ', opt.data_path, flush=True)
 
 	# load dataset
-	#[src_images, tar_images] = load_images(path)
-	#print(f'Loaded: {src_images.shape}, {tar_images.shape}', flush=True)
+	[src_images, tar_images] = load_images(opt.data_path)
+	print(f'Loaded: {src_images.shape}, {tar_images.shape}', flush=True)
 
-	filename = 'model/gan_train.npz'    
-	
+	r = Path(opt.save_dir) / "plot_results"	# results directory
+	r.mkdir(parents=True, exist_ok=True)  # make dir
+
+	opt.plotresults_path = r
+
+	filename = Path(opt.save_dir) / 'gan_train.npz'
+
+	print(f'Compressing data set to {filename}.  This will take some time.  Please wait.', flush=True)
 	# save as compressed numpy array
-	#savez_compressed(filename, src_images, tar_images)
-	#print(f'Saved dataset: {filename}', flush=True)    
+	savez_compressed(filename, src_images, tar_images)
+	print(f'Saved compressed dataset: {filename}', flush=True)
+
+	opt.compressed_dataset = filename
+
+	src_images = None
+	tar_images = None
+
+	input("Press Enter to continue...")
+	
 
 	#data = load(filename)
 	#src_images, tar_images = data['arr_0'], data['arr_1']
 	#print(f'Loaded: {src_images.shape}, {tar_images.shape}', flush=True)    
 
-	# load image data
+	# # load image data
 	dataset = load_real_samples(filename)
+	opt.dataset = dataset
 
 	# define input shape based on the loaded dataset
 	image_shape = dataset[0].shape[1:]
@@ -365,9 +392,9 @@ def main(opt):
 	# define the composite model
 	gan_model = define_gan(g_model, d_model, image_shape)	
 
-	print('Training model', flush=True)
+	print(f'Training model with {opt.epochs} epochs and a batch size of {opt.batch_size}\nResults can be found at {opt.save_dir}', flush=True)
 
-	preprocess_data(opt)
+	#preprocess_data(opt)
 	train(d_model, g_model, gan_model, opt)
 
 	# train model
